@@ -1,0 +1,4 @@
+core = "../../inferlet-api/core/wit"
+adapter = "../../inferlet-api/adapter/wit"
+image = "../../inferlet-api/image/wit"
+zo = "../../inferlet-api/zo/wit"
