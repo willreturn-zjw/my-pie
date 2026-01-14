@@ -1,0 +1,22 @@
+{
+  "workflow_id": "flow_academic_01",
+  "name": "Research Assistant Chain",
+  "nodes": [
+    {
+      "id": "node_generator",
+      "image": "target/wasm32-wasip2/release/agent_generator.wasm",
+      "dependencies": [],
+      "config": {
+        "topic": "The architectural differences between Von Neumann and Harvard architectures"
+      }
+    },
+    {
+      "id": "node_summarizer",
+      "image": "target/wasm32-wasip2/release/agent_summarizer.wasm",
+      "dependencies": ["node_generator"],
+      "config": {
+        "style": "Concise"
+      }
+    }
+  ]
+}

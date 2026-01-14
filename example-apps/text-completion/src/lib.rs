@@ -8,7 +8,6 @@ async fn main(mut args: Args) -> Result<String> {
     let max_num_outputs: usize = args.value_from_str(["-n", "--max-tokens"]).unwrap_or(256);
 
     let start = Instant::now();
-
     let model = inferlet::get_auto_model();
     let tokenizer = model.get_tokenizer();
     let mut ctx = model.create_context();
