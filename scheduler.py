@@ -6,21 +6,16 @@ import os
 import sys
 
 class PieScheduler:
-    def __init__(self, workflow_path, config_path):
-        # 将相对路径转换为绝对路径，避免子进程调用时出错
+    def __init__(self, workflow_path):
+        # 3.1阶段：不再需要 config_path，因为配置由后台 pie serve 管理
         self.workflow_path = os.path.abspath(workflow_path)
-        self.config_path = os.path.abspath(config_path)
-        
         self.results = {} 
         self.run_id = f"run_{uuid.uuid4().hex[:8]}"
         
-        # === 路径检查 ===
         print(f"[Scheduler] Init checking...")
-        print(f"  - Config:   {self.config_path}")
         print(f"  - Workflow: {self.workflow_path}")
+        print(f"  - Mode:     Client/Server (Connecting to pie serve)")
 
-        if not os.path.exists(self.config_path):
-            raise FileNotFoundError(f"Config file not found: {self.config_path}")
         if not os.path.exists(self.workflow_path):
             raise FileNotFoundError(f"Workflow file not found: {self.workflow_path}")
             
@@ -62,73 +57,86 @@ class PieScheduler:
 
         input_json_str = json.dumps(input_payload)
 
+        # === 核心修改：使用 pie-cli submit ===
+        # pie-cli submit <wasm> -- --input <json>
+        # 注意：这里假设 pie-cli 在 PATH 中，或者在 target/release/pie-cli
+        # 为了稳妥，我们尝试使用 'pie-cli' 命令，如果不行请修改为绝对路径
         cmd = [
-            "pie", "run",
-            "--config", self.config_path,
+            "pie-cli", "submit",
             wasm_path,
             "--", 
             "--input", input_json_str
         ]
 
-        print(f"[Scheduler]     Executing Agent (via Pie Engine)...")
+        print(f"[Scheduler]     Submitting Agent to Engine (via pie-cli)...")
         start_time = time.time()
 
-        # === FIX 1: 设置环境变量减少 Pie 的日志噪音 ===
+        # 同样设置 ENV 减少客户端日志干扰
         env = os.environ.copy()
-        env["RUST_LOG"] = "error"  # 只显示错误日志，隐藏 INFO/WARN
+        env["RUST_LOG"] = "error"
 
         try:
+            # pie-cli submit 会连接 localhost:8080 并流式输出结果
             result = subprocess.run(
                 cmd, 
                 capture_output=True, 
                 text=True, 
                 encoding='utf-8',
                 cwd=os.getcwd(),
-                env=env # 传入环境变量
+                env=env
             )
             
             elapsed = time.time() - start_time
 
             if result.returncode != 0:
-                print(f"[Scheduler] ❌ Agent failed with error:\n{result.stderr}")
+                print(f"[Scheduler] ❌ Agent submission failed:\n{result.stderr}")
+                # 常见错误：Engine 没启动
+                if "Connection refused" in result.stderr:
+                    print("[Scheduler] 💡 Tip: Did you run 'pie serve' in another terminal?")
                 return False
 
             raw_output = result.stdout.strip()
 
-            # === FIX 2: 输出清洗逻辑 ===
-            # Pie 的标准输出包含了系统日志和 Agent 结果。
-            # 格式通常是: [Logs] ... [Inferlet ID] Completed: \n <CONTENT> \n [Shutdown Logs]
-            
+            # === 输出清洗逻辑 (保持 Step 2 的逻辑) ===
             clean_content = raw_output
             
-            # 1. 尝试截取 "Completed:" 之后的内容
+            # pie-cli 的输出可能包含 "Inferlet launched with ID: ..." 等头部信息
+            # 我们的 Agent 输出通常在最后。
+            # 为了简单适配，我们尝试寻找 Agent 的特征输出
+            
+            # 策略：如果 raw_output 包含我们 KVS 写入的 success 标记或者直接取最后一段
+            # 这里暂时沿用之前的清洗逻辑
             if "Completed:" in raw_output:
-                # split(..., 1) 只分割第一次出现的位置
                 parts = raw_output.split("Completed:", 1)
                 if len(parts) > 1:
                     clean_content = parts[1].strip()
             
-            # 2. 去除尾部的 Shutdown 日志 (通常包含 "Stopping backend" 或 🔄)
             if "Stopping backend" in clean_content:
                 clean_content = clean_content.split("Stopping backend")[0].strip()
-            if "🔄" in clean_content: # 去除 emoji 开头的日志
+            if "🔄" in clean_content:
                  clean_content = clean_content.split("🔄")[0].strip()
-            # 3. 去除 Llama 模型常见的结束符
             if "<|eot_id|>" in clean_content:
                 clean_content = clean_content.replace("<|eot_id|>", "").strip()
 
+            # 去除 pie-cli 可能特有的头部日志
+            lines = clean_content.split('\n')
+            # 简单的 heuristic: 如果第一行包含 "Inferlet launched", 去掉它
+            if lines and "Inferlet launched" in lines[0]:
+                clean_content = "\n".join(lines[1:]).strip()
+
             print(f"[Scheduler] ✅ Node {node_id} finished in {elapsed:.2f}s")
-            
-            # 打印清洗后的结果预览
             preview = clean_content if len(clean_content) < 100 else clean_content[:100] + "..."
             print(f"[Scheduler]    Clean Output: {preview}")
 
             self.results[node_id] = {
-                "content": clean_content, # 存储清洗后的内容
+                "content": clean_content,
                 "status": "success"
             }
             return True
 
+        except FileNotFoundError:
+            print("[Scheduler] ❌ Error: 'pie-cli' command not found. Please add it to PATH or edit scheduler.py.")
+            return False
         except Exception as e:
             print(f"[Scheduler] System Error: {e}")
             return False
@@ -171,22 +179,12 @@ class PieScheduler:
             print(f"[{nid}]: {res['content']}")
 
 if __name__ == "__main__":
-    # === 路径配置 (请根据你的实际情况核对) ===
-    
-    # 1. 配置文件路径
-    # 既然 scheduler.py 现在在 /root/pie/ 下，
-    # 且 example_config.toml 通常也在 /root/pie/ 下：
-    config_file = "../pie/pie/example_config.toml" 
-
-    # 2. 工作流文件路径
-    # workflow_demo.json 还在 /root/pie/example-apps/ 下
     workflow_file = "example-apps/workflow_demo.json"
-
-    # 运行
+    
     try:
-        scheduler = PieScheduler(workflow_file, config_file)
+        # Step 3.1: 只需要传入 workflow 文件路径
+        scheduler = PieScheduler(workflow_file)
         scheduler.run()
     except FileNotFoundError as e:
         print(f"Error: {e}")
-        print("Please verify the file paths in the '__main__' section of scheduler.py")
         sys.exit(1)
