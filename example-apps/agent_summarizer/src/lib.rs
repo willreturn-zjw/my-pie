@@ -37,7 +37,8 @@ async fn main(mut args: Args) -> Result<String> {
     let model = inferlet::get_auto_model();
     let mut ctx = model.create_context();
 
-    ctx.fill_system("You are a concise editor.");
+    let system_prompt = format!("[CID:{}]You are a concise editor.", input_data.run_id);
+    ctx.fill_system(&system_prompt);
     ctx.fill_user(&format!("Summarize this:\n\n\"{}\"", source_text));
 
     let sampler = Sampler::top_p(0.6, 0.95);
