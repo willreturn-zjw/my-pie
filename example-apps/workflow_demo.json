@@ -11,7 +11,15 @@
       }
     },
     {
-      "id": "node_summarizer",
+      "id": "node_summarizer1",
+      "image": "target/wasm32-wasip2/release/agent_summarizer.wasm",
+      "dependencies": ["node_generator"],
+      "config": {
+        "style": "Concise"
+      }
+    },
+    {
+      "id": "node_summarizer2",
       "image": "target/wasm32-wasip2/release/agent_summarizer.wasm",
       "dependencies": ["node_generator"],
       "config": {
