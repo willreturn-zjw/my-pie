@@ -1,0 +1,15 @@
+[package]
+name = "story_agent"
+version = "0.1.0"
+edition = "2021"  # 保持稳定版本，或者用 2024 如果你的编译器支持
+
+[lib]
+crate-type = ["cdylib"] # 必须是 cdylib 才能编译为 wasm 模块
+
+[dependencies]
+inferlet = { workspace = true }
+inferlet-macros = { workspace = true }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# 移除 tokio，因为我们使用 inferlet 提供的运行时

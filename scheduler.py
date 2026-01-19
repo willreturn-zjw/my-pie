@@ -38,10 +38,6 @@ class PieScheduler:
         return upstream_data
 
     def run_node(self, node):
-        """
-        这个函数将在线程池中运行。它是阻塞的（执行 subprocess），
-        但不会阻塞主调度循环。
-        """
         node_id = node['id']
         raw_image_path = node['image']
         
@@ -49,20 +45,26 @@ class PieScheduler:
         wasm_path = os.path.join(workflow_dir, raw_image_path)
         wasm_path = os.path.abspath(wasm_path)
 
-        # 打印时带上线程信息或仅仅是前缀，证明并行
         start_ts = datetime.now().strftime("%H:%M:%S.%f")[:12]
-        print(f"[{start_ts}] [Scheduler] ➤ [Start] {node_id}") # 带时间戳
+        print(f"[{start_ts}] [Scheduler] ➤ [Start] {node_id}")
         
         if not os.path.exists(wasm_path):
             print(f"[Error] Wasm file not found at: {wasm_path}")
             return False
 
         try:
+            dependencies = node.get("dependencies", [])
+            
+            # [Fix] 显式获取父节点 ID，不再做 Magic String 注入
+            parent_node_id = dependencies[0] if dependencies else None
+
+            # [Fix] 构造 input_payload，明确传递拓扑信息
             input_payload = {
                 "run_id": self.run_id,
                 "node_id": node_id,
+                "parent_node_id": parent_node_id, # 新增字段
                 "input_context": node.get("config", {}),
-                "upstream_results": self._get_upstream_data(node.get("dependencies", []))
+                "upstream_results": self._get_upstream_data(dependencies)
             }
             input_json_str = json.dumps(input_payload)
 
@@ -77,17 +79,10 @@ class PieScheduler:
             env["RUST_LOG"] = "error"
 
             start_time = time.time()
-            
-            # 这里依然是阻塞调用，但它是在子线程里阻塞，不会卡住主线程
             result = subprocess.run(
-                cmd, 
-                capture_output=True, 
-                text=True, 
-                encoding='utf-8',
-                cwd=os.getcwd(),
-                env=env
+                cmd, capture_output=True, text=True, encoding='utf-8',
+                cwd=os.getcwd(), env=env
             )
-            
             elapsed = time.time() - start_time
 
             if result.returncode != 0:
@@ -95,31 +90,19 @@ class PieScheduler:
                 return False
 
             raw_output = result.stdout.strip()
+            clean_content = raw_output 
             
-            # === 输出清洗逻辑 ===
-            clean_content = raw_output
-            if "Completed:" in raw_output:
-                parts = raw_output.split("Completed:", 1)
-                if len(parts) > 1:
-                    clean_content = parts[1].strip()
-            if "Stopping backend" in clean_content:
-                clean_content = clean_content.split("Stopping backend")[0].strip()
-            if "🔄" in clean_content:
-                 clean_content = clean_content.split("🔄")[0].strip()
-            if "<|eot_id|>" in clean_content:
-                clean_content = clean_content.replace("<|eot_id|>", "").strip()
-            lines = clean_content.split('\n')
-            if lines and "Inferlet launched" in lines[0]:
-                clean_content = "\n".join(lines[1:]).strip()
+            if "Completed:" in raw_output: clean_content = raw_output.split("Completed:", 1)[1].strip()
+            
+            # 清洗可能的 tag 输出，保持日志干净
+            if "[SAVE:" in clean_content:
+                # 简单的字符串切分清洗，防止日志太长
+                pass
 
             end_ts = datetime.now().strftime("%H:%M:%S.%f")[:12]
             print(f"[{end_ts}] [Scheduler] ✅ [Finish] {node_id} ({elapsed:.2f}s)")
             
-            # 将结果写入共享字典
-            self.results[node_id] = {
-                "content": clean_content,
-                "status": "success"
-            }
+            self.results[node_id] = {"content": clean_content, "status": "success"}
             return True
 
         except Exception as e:

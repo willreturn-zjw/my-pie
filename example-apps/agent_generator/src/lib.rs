@@ -36,8 +36,16 @@ async fn main(mut args: Args) -> Result<String> {
             e
         })?
     };
+    
+    // [Fix 1] 获取 Scheduler 注入的 Cache Header (包含 SAVE 指令)
+    let mut header_tags = String::new();
+    if let Some(tags) = input_data.input_context.get("_ctx_header") {
+        header_tags = tags.clone();
+    } else {
+        // 回退逻辑：手动拼接 node_id 以确保唯一性 (防止并行 Generator 冲突)
+        header_tags = format!("[SAVE:{}_{}]", input_data.run_id, input_data.node_id);
+    }
 
-    // [Fix]: 使用 map(as_str) 避免临时变量生命周期问题
     let topic = input_data.input_context.get("topic")
         .map(|s| s.as_str())
         .unwrap_or("AI");
@@ -45,7 +53,10 @@ async fn main(mut args: Args) -> Result<String> {
     let model = inferlet::get_auto_model();
     let mut ctx = model.create_context();
 
-    let system_prompt = format!("[CID:{}]You are a creative writer.", input_data.run_id);
+    // [Fix 2] 将 Header 放在 System Prompt 最前面
+    // 这样后端 server.py 才能正确解析 [SAVE:...] 指令
+    let system_prompt = format!("{}You are a creative writer.", header_tags);
+    
     ctx.fill_system(&system_prompt);
     ctx.fill_user(&format!("Write a short paragraph about {}.", topic));
 

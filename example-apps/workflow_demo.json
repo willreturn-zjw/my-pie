@@ -1,30 +1,41 @@
 {
-  "workflow_id": "flow_academic_01",
-  "name": "Research Assistant Chain",
+  "name": "The Multiverse Story",
   "nodes": [
     {
-      "id": "node_generator",
-      "image": "target/wasm32-wasip2/release/agent_generator.wasm",
-      "dependencies": [],
+      "id": "node_intro",
+      "image": "target/wasm32-wasip2/release/story_agent.wasm",
       "config": {
-        "topic": "The architectural differences between Von Neumann and Harvard architectures"
-      }
+        "mode": "start",
+        "instruction": "Start the story about a knight finding a magic sword."
+      },
+      "dependencies": []
     },
     {
-      "id": "node_summarizer1",
-      "image": "target/wasm32-wasip2/release/agent_summarizer.wasm",
-      "dependencies": ["node_generator"],
+      "id": "node_good",
+      "image": "target/wasm32-wasip2/release/story_agent.wasm",
       "config": {
-        "style": "Concise"
-      }
+        "mode": "continue",
+        "instruction": "Continue: The knight uses the sword to protect the weak."
+      },
+      "dependencies": ["node_intro"]
     },
     {
-      "id": "node_summarizer2",
-      "image": "target/wasm32-wasip2/release/agent_summarizer.wasm",
-      "dependencies": ["node_generator"],
+      "id": "node_evil",
+      "image": "target/wasm32-wasip2/release/story_agent.wasm",
       "config": {
-        "style": "Concise"
-      }
+        "mode": "continue",
+        "instruction": "Continue: The sword corrupts the knight, he becomes a tyrant."
+      },
+      "dependencies": ["node_intro"]
+    },
+    {
+      "id": "node_finale",
+      "image": "target/wasm32-wasip2/release/story_agent.wasm",
+      "config": {
+        "mode": "merge",
+        "instruction": "Summarize the moral."
+      },
+      "dependencies": ["node_good", "node_evil"]
     }
   ]
 }
