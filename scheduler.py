@@ -37,7 +37,7 @@ class PieScheduler:
                 raise Exception(f"Dependency {dep_id} not executed yet!")
         return upstream_data
 
-    def run_node(self, node):
+    def run_node(self, node,parent_node):
         node_id = node['id']
         raw_image_path = node['image']
         
@@ -57,12 +57,14 @@ class PieScheduler:
             
             # [Fix] 显式获取父节点 ID，不再做 Magic String 注入
             parent_node_id = dependencies[0] if dependencies else None
+            parent_node_instruction = parent_node['config']['instruction'] if dependencies else None
 
             # [Fix] 构造 input_payload，明确传递拓扑信息
             input_payload = {
                 "run_id": self.run_id,
                 "node_id": node_id,
                 "parent_node_id": parent_node_id, # 新增字段
+                "parent_node_instruction": parent_node_instruction,
                 "input_context": node.get("config", {}),
                 "upstream_results": self._get_upstream_data(dependencies)
             }
@@ -139,7 +141,13 @@ class PieScheduler:
                 for node in ready_nodes:
                     nid = node['id']
                     # 提交给线程池，非阻塞
-                    future = executor.submit(self.run_node, node)
+                    dependencies = node.get("dependencies", [])
+                    # [Fix] 显式获取父节点 ID，不再做 Magic String 注入
+                    parent_node_id = dependencies[0] if dependencies else None
+                    if parent_node_id == None:
+                        future = executor.submit(self.run_node, node,node)
+                    else:
+                        future = executor.submit(self.run_node, node,all_nodes[parent_node_id])
                     futures[future] = nid
                     
                     # 标记状态

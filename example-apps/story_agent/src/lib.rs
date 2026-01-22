@@ -9,6 +9,7 @@ pub struct AgentInput {
     pub node_id: String,
     // [Fix] 接收 Scheduler 传来的 parent_id
     pub parent_node_id: Option<String>, 
+    pub parent_node_instruction: Option<String>, 
     pub input_context: HashMap<String, String>,
     pub upstream_results: HashMap<String, String>,
 }
@@ -61,7 +62,7 @@ async fn main(mut args: Args) -> Result<String> {
             // 复用逻辑：必须完全重现父节点的历史对话结构
             if let Some((_, parent_output)) = input_data.upstream_results.iter().next() {
                 // 1. 父节点的输入 (为了演示，这里硬编码，实际应该从 upstream 传)
-                ctx.fill_user("Start the story about a knight finding a magic sword."); 
+                ctx.fill_user(input_data.parent_node_instruction.as_deref().unwrap_or(""));
                 // 2. 父节点的输出 (Prefill)
                 ctx.fill_assistant(parent_output);
                 // 3. 当前节点的指令
