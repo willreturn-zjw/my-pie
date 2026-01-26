@@ -455,16 +455,24 @@ class Handler:
                         
                     # 优先级 2: Fork (如果没自己的缓存，但有 LOAD 指令)
                     elif load_id and load_id in self.kv_cache_store:
-                        print(f"[Backend] 🍴 FORK: {load_id} -> {save_id}")
-                        # 【重要】必须深拷贝！否则 A 和 B 会改同一个 Tensor
-                        parent_cache = self.kv_cache_store[load_id]
-                        # 立即创建副本并赋值给 save_id，这样后续逻辑就以为 save_id 本来就存在
-                        self.kv_cache_store[save_id] = self._clone_cache(parent_cache)
                         
-                        # 打印命中信息
-                        # 假设 cache 结构是 [layer][0] shape [seq_len, ...]
-                        pages = self.kv_cache_store[save_id][0][0].shape[0] # 粗略估算
-                        print(f"[Backend] ⚡ CACHE INHERITED: {pages} pages ready.")
+                        # =========== [修改开始] 开关控制 ===========
+                        # 将此处设为 False 即可禁用复用，进行对比实验
+                        ENABLE_CACHE_INHERITANCE = True
+                        # =========================================
+
+                        if ENABLE_CACHE_INHERITANCE:
+                            print(f"[Backend] 🍴 FORK: {load_id} -> {save_id}")
+                            # 【重要】必须深拷贝！否则 A 和 B 会改同一个 Tensor
+                            parent_cache = self.kv_cache_store[load_id]
+                            self.kv_cache_store[save_id] = self._clone_cache(parent_cache)
+                            
+                            # 打印命中信息
+                            pages = self.kv_cache_store[save_id][0][0].shape[0]
+                            print(f"[Backend] ⚡ CACHE INHERITED: {pages} pages ready.")
+                        else:
+                            # 实验模式：禁用复用，打印日志证明我们跳过了优化
+                            print(f"[Backend] 🚫 ABLATION STUDY: Skipping Cache Inheritance for {save_id}")
 
                     batch.add_request(req)
 

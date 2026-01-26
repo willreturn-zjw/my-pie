@@ -20,11 +20,29 @@
       "dependencies": ["node_intro"]
     },
     {
-      "id": "node_evil",
+      "id": "node_bad",
       "image": "target/wasm32-wasip2/release/story_agent.wasm",
       "config": {
         "mode": "continue",
-        "instruction": "Continue: The sword corrupts the knight, he becomes a tyrant."
+        "instruction": "Continue: This sword lured the knight, and the knight could no longer fight."
+      },
+      "dependencies": ["node_intro"]
+    },
+    {
+      "id": "node_good1",
+      "image": "target/wasm32-wasip2/release/story_agent.wasm",
+      "config": {
+        "mode": "continue",
+        "instruction": "Continue: The knight uses the sword to protect the weak."
+      },
+      "dependencies": ["node_intro"]
+    },
+    {
+      "id": "node_good2",
+      "image": "target/wasm32-wasip2/release/story_agent.wasm",
+      "config": {
+        "mode": "continue",
+        "instruction": "Continue: The knight uses the sword to protect the weak."
       },
       "dependencies": ["node_intro"]
     },
@@ -35,7 +53,7 @@
         "mode": "merge",
         "instruction": "Summarize the moral."
       },
-      "dependencies": ["node_good", "node_evil"]
+      "dependencies": ["node_good", "node_bad"]
     }
   ]
 }

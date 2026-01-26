@@ -10,7 +10,7 @@ log = "pie.log"
 [[backend]]
 backend_type = "python"
 exec_path = "backend/backend-python/server.py"
-model = "llama-3.2-1b-instruct"
+model = "llama-3.2-3b-instruct"
 device = "cuda:0"
 dtype = "bfloat16"
 kv_page_size = 16
@@ -20,5 +20,5 @@ max_num_kv_pages = 10240
 max_num_embeds = 128
 max_num_adapters = 32
 max_adapter_rank = 8
-gpu_mem_headroom = 10.0
+gpu_mem_headroom = 0.05
 enable_profiling = false

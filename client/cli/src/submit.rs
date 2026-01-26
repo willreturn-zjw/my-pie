@@ -68,11 +68,11 @@ pub async fn handle_submit_command(args: SubmitArgs) -> Result<()> {
     let inferlet_blob = fs::read(&args.inferlet)
         .context(format!("Failed to read Wasm file at {:?}", args.inferlet))?;
     let hash = client::hash_blob(&inferlet_blob);
-    println!("Inferlet hash: {}", hash);
+    eprintln!("Inferlet hash: {}", hash);
 
     if !client.program_exists(&hash).await? {
         client.upload_program(&inferlet_blob).await?;
-        println!("✅ Inferlet upload successful.");
+        eprintln!("✅ Inferlet upload successful.");
     }
 
     let mut library_hashes = Vec::new();
@@ -80,11 +80,11 @@ pub async fn handle_submit_command(args: SubmitArgs) -> Result<()> {
         let library_blob = fs::read(library_path)
             .context(format!("Failed to read library file at {:?}", library_path))?;
         let library_hash = client::hash_blob(&library_blob);
-        println!("Library hash: {}", library_hash);
+        eprintln!("Library hash: {}", library_hash);
 
         if !client.program_exists(&library_hash).await? {
             client.upload_program(&library_blob).await?;
-            println!("✅ Library upload successful.");
+            eprintln!("✅ Library upload successful.");
         }
 
         library_hashes.push(library_hash);
@@ -106,7 +106,7 @@ pub async fn handle_submit_command(args: SubmitArgs) -> Result<()> {
         )
         .await?;
 
-    println!("✅ Inferlet launched with ID: {}", instance.id());
+    eprintln!("✅ Inferlet launched with ID: {}", instance.id());
 
     if !args.detached {
         engine::stream_inferlet_output(instance, client).await?;

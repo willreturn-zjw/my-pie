@@ -81,8 +81,10 @@ async fn main(mut args: Args) -> Result<String> {
         _ => { ctx.fill_user(&instruction); }
     }
 
-    let sampler = Sampler::top_p(0.6, 0.9);
-    let stop_cond = max_len(256).or(ends_with_any(model.eos_tokens()));
+    let sampler = Sampler::top_p(0.0, 1.0);
+    //let sampler = Sampler::top_p(0.6, 0.9);
+    let stop_cond = max_len(128).or(ends_with_any(model.eos_tokens()));
+    //let stop_cond = max_len(1024).or(ends_with_any(model.eos_tokens()));
 
     // 生成
     let generated: String = ctx.generate(sampler, stop_cond).await;
