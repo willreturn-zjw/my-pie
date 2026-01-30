@@ -29,15 +29,29 @@ async fn main(mut args: Args) -> Result<String> {
     let input_json: String = args.value_from_str(["-i", "--input"])?;
     let input: AgentInput = serde_json::from_str(&input_json)?;
     
-    // 这里我们演示：继承 Good 的 KV 链，同时参考 Bad 的文本
-    let base_id = &input.parent_task_ids[0]; // Good
-    let ref_id = &input.parent_task_ids[1];  // Bad
+    // 约定：
+    // parent_task_ids[0] 是 Base (提供 KV 基础)
+    // parent_task_ids[1..] 都是 Reference (提供纯文本素材)
+    if input.parent_task_ids.len() < 2 {
+        anyhow::bail!("Merge Agent requires at least one base and one reference.");
+    }
+    
+    let base_id = &input.parent_task_ids[0];
+    
+    // 1. 动态加载所有参考分支的文本
+    let mut references_text = String::new();
+    for (idx, ref_id) in input.parent_task_ids.iter().skip(1).enumerate() {
+        let ref_key = format!("{}_output", ref_id);
+        let text = store_get(&ref_key).unwrap_or_else(|| "[(Missing Data)]".to_string());
+        
+        // 格式化拼接到 prompt 中
+        use std::fmt::Write;
+        write!(references_text, "\n=== Perspective {} (Source: {}) ===\n{}\n", idx + 1, ref_id, text).ok();
+    }
 
-    // 1. 获取文本参考 (Bad)
-    let ref_output_key = format!("{}_output", ref_id);
-    let ref_text = store_get(&ref_output_key).unwrap_or_default();
+    eprintln!("[Debug] Loaded {} reference texts.", input.parent_task_ids.len() - 1);
 
-    // 2. 加载 Base (Good) 的元数据
+    // 2. 加载 Base 的元数据 (和之前一样)
     let base_meta_key = format!("{}_meta", base_id);
     let meta_json = store_get(&base_meta_key)
         .ok_or_else(|| anyhow::anyhow!("Base meta not found"))?;
@@ -74,8 +88,8 @@ async fn main(mut args: Args) -> Result<String> {
 
     // 5. 混合 Prompt
     let hybrid_prompt = format!(
-        "The story so far (Memory) is active. \n\nParallel Timeline Report:\n\"{}\"\n\nInstruction: {}", 
-        ref_text, 
+        "The following are different accounts of the same event from different perspectives:\n{}\n\nBased on the main timeline (Perspective 1) and the conflicting accounts above, analyze the truth and summarize what truly happened: {}", 
+        references_text, 
         input.prompt
     );
     ctx.fill_user(&hybrid_prompt);

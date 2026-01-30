@@ -1,29 +1,35 @@
 {
-  "name": "The Multiverse Story",
+  "name": "The Rashomon Mystery",
   "nodes": [
     {
       "id": "node_intro",
       "image": "target/wasm32-wasip2/release/start_agent.wasm",
-      "instruction": "Start the story about a knight finding a magic sword.",
+      "instruction": "Set the scene: A crowded tavern named 'The Broken Shield' at night. A legendary Dragon Egg is displayed on the bar. Suddenly, the lights go out.",
       "dependencies": []
     },
     {
-      "id": "node_good",
+      "id": "node_knight",
       "image": "target/wasm32-wasip2/release/continue_agent.wasm",
-      "instruction": "Continue to develop the storyline using this theme: The knight uses the sword to protect the weak.",
+      "instruction": "Continue from the Knight's POV: He drew his sword immediately, fought off shadowy figures, and swears he saw a giant Orc smash the egg.",
       "dependencies": ["node_intro"]
     },
     {
-      "id": "node_bad",
+      "id": "node_wizard",
       "image": "target/wasm32-wasip2/release/continue_agent_standby.wasm",
-      "instruction": "Continue to develop the storyline using this theme: The knight was unable to utilize the full power of this sword.",
+      "instruction": "Continue from the Wizard's POV: He sensed a sleep spell in the corner. He claimed that it was a bard who hypnotized everyone and then stole the eggs.",
       "dependencies": ["node_intro"]
     },
     {
-      "id": "node_finale",
+      "id": "node_thief",
+      "image": "target/wasm32-wasip2/release/continue_agent_standby.wasm",
+      "instruction": "Continue from the Thief's POV: Continue from the Thief's POV:When the lights went out,she quietly swapped the egg for a painted rock and slipped out the window.",
+      "dependencies": ["node_intro"]
+    },
+    {
+      "id": "node_truth",
       "image": "target/wasm32-wasip2/release/merge_agent.wasm",
-      "instruction": "Compare these two stories with different endings and summarize the moral lesson.",
-      "dependencies": ["node_good", "node_bad"]
+      "instruction": "You are the historian. Analyze the statements of the knights, wizards and thieves. Uncover the truth about what happened to that egg.",
+      "dependencies": ["node_knight", "node_wizard", "node_thief"]
     }
   ]
 }
