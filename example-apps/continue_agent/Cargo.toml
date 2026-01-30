@@ -1,5 +1,5 @@
 [package]
-name = "agent_generator"
+name = "continue_agent"
 version = "0.1.0"
 edition = "2021"  # 保持稳定版本，或者用 2024 如果你的编译器支持
 

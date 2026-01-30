@@ -1,110 +1,206 @@
-use inferlet::{Args, Result, Sampler, store_set};
-use inferlet::stop_condition::{ends_with_any, max_len, StopCondition};
+use inferlet::{Args, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use inferlet::forward::{Forward};
 
+// 1. 定义与 Python Scheduler 严格对应的输入结构
 #[derive(Serialize, Deserialize, Debug)]
-pub struct AgentInput {
-    pub run_id: String,
-    pub node_id: String,
-    // [Fix] 接收 Scheduler 传来的 parent_id
-    pub parent_node_id: Option<String>, 
-    pub parent_node_instruction: Option<String>, 
-    pub input_context: HashMap<String, String>,
-    pub upstream_results: HashMap<String, String>,
+pub struct TaskInput {
+    pub task_id: String,
+    pub parent_task_id: Option<String>,
+    
+    // [修正] 对应 Python 中的 prompt 字段 (实际内容来自 JSON 的 instruction)
+    pub prompt: String, 
+    
+    // [修正] 必须接收 mode 字段来决定行为
+    // 如果 Python 没有传 mode，默认为 continue 以保持兼容
+    #[serde(default = "default_mode")] 
+    pub mode: String, 
+
+    pub params: GenerationParams,
 }
 
+fn default_mode() -> String { "continue".to_string() }
+
 #[derive(Serialize, Deserialize, Debug)]
-pub struct AgentOutput {
-    pub node_id: String,
-    pub content: String,
+pub struct GenerationParams {
+    pub max_tokens: usize,
+    pub temperature: f32,
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+}
+
+fn default_top_p() -> f32 { 0.9 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TaskMetadata {
+    pub token_ids: Vec<u32>,
 }
 
 #[inferlet::main]
 async fn main(mut args: Args) -> Result<String> {
+    // ==========================================
+    // 1. 解析输入与协议校验
+    // ==========================================
     let input_str: String = args.value_from_str("--input").unwrap_or_default();
-    let input_data: AgentInput = serde_json::from_str(&input_str).map_err(|e| {
-        eprintln!("[StoryAgent] JSON Error: {}", e);
+    eprintln!("[Agent] Raw Input: {}", input_str);
+
+    let req: TaskInput = serde_json::from_str(&input_str).map_err(|e| {
+        eprintln!("[Agent] JSON Parse Error: {}", e);
         e
     })?;
 
-    // === [CORE LOGIC] 构造 KV Cache 控制标签 ===
-    let self_cid = format!("{}_{}", input_data.run_id, input_data.node_id);
-    let save_tag = format!("[SAVE:{}]", self_cid);
-    
-    let load_tag = if let Some(parent) = &input_data.parent_node_id {
-        let parent_cid = format!("{}_{}", input_data.run_id, parent);
-        format!("[LOAD:{}]", parent_cid)
-    } else {
-        String::new()
-    };
+    eprintln!("[Agent] Task: {} | Mode: {} | Prompt Len: {}", 
+        req.task_id, req.mode, req.prompt.len());
 
-    // 将标签放在 System Prompt 的最最最前面！
-    // 这样 Backend 解码前几个 token 时一定能看到。
-    let base_system = "You are a fantasy novel writer.";
-    let system_prompt = format!("{}{}{}", load_tag, save_tag, base_system);
-    
-    // ===========================================
-
+    // ==========================================
+    // 2. 初始化资源
+    // ==========================================
     let model = inferlet::get_auto_model();
-    let mut ctx = model.create_context();
-    
-    ctx.fill_system(&system_prompt);
+    let tokenizer = model.get_tokenizer();
+    let queue = model.create_queue(); 
 
-    let mode = input_data.input_context.get("mode").map(|s| s.as_str()).unwrap_or("start");
-    let instruction = input_data.input_context.get("instruction").unwrap_or(&"Write something.".to_string()).clone();
+    // ==========================================
+    // 3. 状态管理策略 (核心修正)
+    // ==========================================
+    // 根据 mode 决定是否继承历史
+    let mut token_history = Vec::new();
 
-    match mode {
+    match req.mode.as_str() {
         "start" => {
-            ctx.fill_user(&instruction);
-        }
-        "continue" => {
-            // 复用逻辑：必须完全重现父节点的历史对话结构
-            if let Some((_, parent_output)) = input_data.upstream_results.iter().next() {
-                // 1. 父节点的输入 (为了演示，这里硬编码，实际应该从 upstream 传)
-                ctx.fill_user(input_data.parent_node_instruction.as_deref().unwrap_or(""));
-                // 2. 父节点的输出 (Prefill)
-                ctx.fill_assistant(parent_output);
-                // 3. 当前节点的指令
-                ctx.fill_user(&instruction);
-            } else {
-                ctx.fill_user(&instruction);
+            eprintln!("[Agent] Mode 'start': Ignoring history, starting fresh.");
+            // 即使有 parent_task_id 也不加载，强制由 instruction 开头
+        },
+        "continue" | "merge" => {
+            // continue: 正常的续写
+            // merge: 在这个简化 Demo 中，我们假设 merge 也是接在某个分支后面进行总结
+            if let Some(parent_id) = &req.parent_task_id {
+                let meta_key = format!("{}_meta", parent_id);
+                if let Some(meta_json) = inferlet::store_get(&meta_key) {
+                    if let Ok(meta) = serde_json::from_str::<TaskMetadata>(&meta_json) {
+                        eprintln!("[Agent] Mode '{}': Loaded history from parent {}: {} tokens.", 
+                            req.mode, parent_id, meta.token_ids.len());
+                        token_history = meta.token_ids;
+                    } else {
+                        eprintln!("[Agent] Warning: Failed to parse parent metadata.");
+                    }
+                } else {
+                    eprintln!("[Agent] Warning: Parent metadata not found (key: {}). Starting fresh.", meta_key);
+                }
             }
+        },
+        _ => {
+            eprintln!("[Agent] Unknown mode '{}', treating as 'continue'", req.mode);
         }
-        "merge" => {
-            let mut combined = String::new();
-            for (k, v) in &input_data.upstream_results {
-                combined.push_str(&format!("Option [{}]: {}\n", k, v));
-            }
-            ctx.fill_user(&format!("Summarize these two endings:\n{}", combined));
-        }
-        _ => { ctx.fill_user(&instruction); }
     }
 
-    let sampler = Sampler::top_p(0.0, 1.0);
-    //let sampler = Sampler::top_p(0.6, 0.9);
-    let stop_cond = max_len(128).or(ends_with_any(model.eos_tokens()));
-    //let stop_cond = max_len(1024).or(ends_with_any(model.eos_tokens()));
+    // ==========================================
+    // 4. KV Page 准备与重算 (Recompute Strategy)
+    // ==========================================
+    // 依然使用重算策略来规避 Copy/Export 的所有权复杂性
+    let mut kv_pages = vec![queue.new_kv_page()];
+    let page_size = model.get_kv_page_size() as usize;
+    let mut last_page_len = 0;
 
-    // 生成
-    let generated: String = ctx.generate(sampler, stop_cond).await;
+    // 阶段一：Prefill (如果 History 不为空)
+    if !token_history.is_empty() {
+        let total_hist = token_history.len();
+        let pages_needed = (total_hist + page_size - 1) / page_size;
+        while kv_pages.len() < pages_needed {
+            kv_pages.push(queue.new_kv_page());
+        }
+        
+        let pass = queue.create_forward_pass();
+        let positions: Vec<u32> = (0..total_hist).map(|i| i as u32).collect();
+        pass.input_tokens(&token_history, &positions);
+        pass.kv_cache(&kv_pages, 0);
+        let _ = pass.execute().await;
+        
+        last_page_len = total_hist % page_size;
+        eprintln!("[Agent] History restored (recomputed).");
+    }
+
+    // ==========================================
+    // 5. 阶段二：生成 (Generation)
+    // ==========================================
     
-    // 清洗输出中的标签（以防万一模型把它输出了）
-    let clean_generated = generated
-        .replace(&save_tag, "")
-        .replace(&load_tag, "")
-        .replace("<|start_header_id|>", "")
-        .trim()
-        .to_string();
+    // 构造当前 Prompt 的 Tokens
+    // 注意：Workflow JSON 中的 "instruction" 会被 Scheduler 传入 req.prompt
+    let input_tokens = tokenizer.tokenize(&req.prompt);
+    
+    // 如果是 Start 模式，输入就是整个故事的开头
+    // 如果是 Continue 模式，输入是追加的指令或续写内容
+    
+    let mut generated_text = String::new();
+    
+    if !input_tokens.is_empty() {
+        let mut current_pos = token_history.len() as u32;
+        let mut tokens_to_process = input_tokens.clone();
+        let max_gen = req.params.max_tokens;
+        let mut gen_count = 0;
+        let eos_token_sets = model.eos_tokens();
 
-    eprintln!("[{}] Output len: {}", input_data.node_id, clean_generated.len());
+        while gen_count < max_gen {
+            let pass = queue.create_forward_pass();
+            let positions: Vec<u32> = (0..tokens_to_process.len())
+                .map(|i| current_pos + i as u32)
+                .collect();
+            
+            pass.input_tokens(&tokens_to_process, &positions);
+            pass.kv_cache(&kv_pages, last_page_len);
+            
+            // 采样参数
+            let last_idx = (tokens_to_process.len() - 1) as u32;
+            pass.output_tokens_top_p(&[last_idx], req.params.temperature, req.params.top_p);
 
-    let output = AgentOutput {
-        node_id: input_data.node_id.clone(),
-        content: clean_generated.clone(),
-    };
-    let kvs_key = format!("{}:{}", input_data.run_id, input_data.node_id);
-    store_set(&kvs_key, &serde_json::to_string(&output).unwrap());
+            let result = pass.execute().await;
 
-    Ok(clean_generated)
+            if let Some(out_tokens) = result.tokens {
+                if let Some(&next_token) = out_tokens.first() {
+                    token_history.extend_from_slice(&tokens_to_process);
+                    current_pos += tokens_to_process.len() as u32;
+                    
+                    // 扩容检查
+                    let current_total = token_history.len();
+                    let pages_needed = (current_total + page_size - 1) / page_size;
+                    while kv_pages.len() < pages_needed {
+                        kv_pages.push(queue.new_kv_page());
+                    }
+                    last_page_len = current_total % page_size;
+
+                    tokens_to_process = vec![next_token];
+                    generated_text.push_str(&tokenizer.detokenize(&[next_token]));
+                    gen_count += 1;
+
+                    // EOS Check
+                    let mut stopped = false;
+                    for eos_seq in &eos_token_sets {
+                        if eos_seq.contains(&next_token) {
+                            stopped = true;
+                            break;
+                        }
+                    }
+                    if stopped { break; }
+                } else { break; }
+            } else { break; }
+        }
+        // 补全最后一步
+        if !tokens_to_process.is_empty() {
+            token_history.extend_from_slice(&tokens_to_process);
+        }
+    }
+
+    // ==========================================
+    // 6. Export 与清理
+    // ==========================================
+    eprintln!("[Agent] Exporting task_id: {}", req.task_id);
+    queue.export_kv_pages(&kv_pages, &req.task_id);
+
+    let meta = TaskMetadata { token_ids: token_history };
+    let meta_json = serde_json::to_string(&meta).unwrap();
+    inferlet::store_set(&format!("{}_meta", req.task_id), &meta_json);
+
+    std::mem::forget(kv_pages);
+    std::mem::forget(queue);
+
+    Ok(generated_text)
 }

@@ -9,7 +9,6 @@ Both backends now provide identical APIs.
 from __future__ import annotations
 
 import time
-import re 
 from contextlib import contextmanager, nullcontext
 
 import numpy as np
@@ -81,8 +80,6 @@ class Handler:
         self.dtype = getattr(torch, config["dtype"])
         self.device = config["device"]
         self.logits_dtype = getattr(torch, config["dtype"])
-        self.kv_cache_store = {}
-        self.active_request_map = {}
 
         # If `gpu_mem_headroom` is set by the user, then we will cap the KV
         # cache size so that there is some percentage of GPU memory left over
@@ -312,243 +309,37 @@ class Handler:
                 pass
 
     @torch.inference_mode()
-    def _clone_cache(self, kv_cache):
-        # kv_cache 是一个 Tensors 列表 [Layer0_Tensor, Layer1_Tensor, ...]
-        cloned_layers = []
-        for layer_tensor in kv_cache:
-            # 直接克隆整个 Tensor，保留 [Pages, ...] 的结构
-            cloned_layers.append(layer_tensor.clone())
-        return cloned_layers
-
-    @torch.inference_mode()
     def forward_pass(self, reqs: list[message.ForwardPassRequest]):
         """
         Processes a batch of forward pass requests through the language model.
         """
-        
-        # ==========================================
-        # [Step 0] 初始化迷你解码器 (指定路径版)
-        # ==========================================
-        if not hasattr(self, "_vocab_map"):
-            self._vocab_map = {}
-            try:
-                import os
-                import base64
-                
-                # 1. 定义候选路径列表 (优先查找你提供的路径)
-                candidate_paths = [
-                    # 绝对路径 (Linux 标准格式)
-                    "/root/.cache/pie/models/llama-3.2-1b-instruct/llama-3.2.vocab",
-                    # 相对路径 (以防脚本不在根目录运行)
-                    "root/.cache/pie/models/llama-3.2-1b-instruct/llama-3.2.vocab",
-                    # 当前目录
-                    "llama-3.2.vocab"
-                ]
-
-                # 2. 尝试从 model_info 动态获取路径 (作为备选)
-                if hasattr(self, "model_info"):
-                    # 获取模型根目录
-                    model_root = None
-                    if isinstance(self.model_info, dict):
-                        model_root = self.model_info.get("path") or self.model_info.get("model_path")
-                    else:
-                        model_root = getattr(self.model_info, "path", None) or getattr(self.model_info, "model_path", None)
-                    
-                    if model_root:
-                        candidate_paths.append(os.path.join(model_root, "llama-3.2.vocab"))
-
-                # 3. 遍历寻找存在的文件的
-                target_file = None
-                for path in candidate_paths:
-                    # 修正 Windows/Linux 路径分隔符差异
-                    normalized_path = path.replace("\\", "/")
-                    if os.path.exists(normalized_path):
-                        target_file = normalized_path
-                        break
-                
-                if target_file:
-                    print(f"[Backend] 📖 Loading vocabulary from: {os.path.abspath(target_file)}")
-                    with open(target_file, "r", encoding="utf-8") as f:
-                        for line in f:
-                            parts = line.strip().split()
-                            if len(parts) >= 2:
-                                # 格式: BASE64_STR ID
-                                try:
-                                    token_b64 = parts[0]
-                                    token_id = int(parts[1])
-                                    token_bytes = base64.b64decode(token_b64)
-                                    self._vocab_map[token_id] = token_bytes
-                                except Exception:
-                                    continue
-                    print(f"[Backend] ✅ Vocab loaded. Size: {len(self._vocab_map)}")
-                else:
-                    print(f"[Backend] ⚠️ Vocab file not found in candidates: {candidate_paths}")
-                    self._vocab_map = None
-
-            except Exception as e:
-                print(f"[Backend] ❌ Failed to load vocab: {e}")
-                self._vocab_map = None
-
-        # ==========================================
-        # [Step 1] 处理请求 (CID 提取与缓存逻辑)
-        # ==========================================
         with start_profile("forward_pass_total"):
-            # 排序...
+            # Sort requests by adapter to optimize the adapter subpass.
             with start_profile("request_sorting"):
                 reqs = sorted(reqs, key=lambda o: (o.adapter is None, o.adapter))
 
-            # [Step 1] 处理请求与缓存控制
+            # 1. Consolidate and process all requests into a single batch.
             with start_profile("batch_consolidation"):
-                self.active_request_map.clear()
                 batch = ForwardPassBatch(self)
-                
-                # 用来记录这次请求的目标 Save ID，以便后续保存
-                self.current_batch_save_id = None 
-                
                 for req in reqs:
-                    # --- 核心逻辑: 解析 LOAD/SAVE 指令 ---
-                    load_id = None
-                    save_id = None
-                    
-                    if hasattr(self, "_vocab_map") and self._vocab_map:
-                        try:
-                            # 1. 解码前缀 (扩大范围到 1000 以防 config 字段靠后)
-                            tokens = req.input_tokens
-                            if hasattr(tokens, "tolist"): tokens = tokens.tolist()
-                            
-                            if tokens:
-                                header_bytes = b""
-                                for tid in tokens[:1000]: # Range check
-                                    header_bytes += self._vocab_map.get(tid, b"")
-                                header_text = header_bytes.decode("utf-8", errors="ignore")
-                                
-                                # 2. 正则提取
-                                l_match = re.search(r'\[LOAD:(.*?)\]', header_text)
-                                s_match = re.search(r'\[SAVE:(.*?)\]', header_text)
-                                
-                                if l_match: load_id = l_match.group(1).strip()
-                                if s_match: save_id = s_match.group(1).strip()
-                                
-                        except Exception:
-                            pass
-                    
-                    # 默认行为
-                    if not save_id: save_id = "default_session"
-                    
-                    # 记录映射关系 (为了最后能保存)
-                    self.active_request_map[id(req)] = save_id
-                    self.current_batch_save_id = save_id
-                    
-                    # 准备 KV Cache 给 forward
-                    # 注意：Pie 的 batch.add_request 通常只处理 inputs
-                    # KV Cache 的注入通常是在 model.forward 时通过 self.kv_cache_store 拿
-                    # 所以我们需要在这里确立“当前要用哪个缓存”
-                    
-                    # === 关键分支逻辑 ===
-                    target_cache = None
-                    
-                    # 优先级 1: Resume (如果已经有 save_id 的缓存，说明是生成的第 2,3...步)
-                    if save_id in self.kv_cache_store:
-                        # 这是一个正在进行的任务，直接用它自己的缓存
-                        # 不需要打印 Resume 日志，否则刷屏
-                        pass 
-                        
-                    # 优先级 2: Fork (如果没自己的缓存，但有 LOAD 指令)
-                    elif load_id and load_id in self.kv_cache_store:
-                        
-                        # =========== [修改开始] 开关控制 ===========
-                        # 将此处设为 False 即可禁用复用，进行对比实验
-                        ENABLE_CACHE_INHERITANCE = True
-                        # =========================================
-
-                        if ENABLE_CACHE_INHERITANCE:
-                            print(f"[Backend] 🍴 FORK: {load_id} -> {save_id}")
-                            # 【重要】必须深拷贝！否则 A 和 B 会改同一个 Tensor
-                            parent_cache = self.kv_cache_store[load_id]
-                            self.kv_cache_store[save_id] = self._clone_cache(parent_cache)
-                            
-                            # 打印命中信息
-                            pages = self.kv_cache_store[save_id][0][0].shape[0]
-                            print(f"[Backend] ⚡ CACHE INHERITED: {pages} pages ready.")
-                        else:
-                            # 实验模式：禁用复用，打印日志证明我们跳过了优化
-                            print(f"[Backend] 🚫 ABLATION STUDY: Skipping Cache Inheritance for {save_id}")
-
                     batch.add_request(req)
 
-            # 2. Finalize
+            # 2. Finalize the batch to get model inputs as tensors.
             with start_profile("batch_finalize"):
                 model_inputs = batch.finalize()
 
-            is_decode_phase = False
-            if "single_token_inference_mode" in model_inputs:
-                is_decode_phase = model_inputs["single_token_inference_mode"]
-
-            # [Step 2] 显存恢复 (Restore)
-            # Pie 的设计通常是 forward 时传入 kv_cache_at_layer。
-            # 我们需要把 self.kv_cache_store[save_id] 的数据填入 self.kv_cache_at_layer
-            
-            if not is_decode_phase and self.current_batch_save_id:
-                target_id = self.current_batch_save_id
-                
-                if target_id in self.kv_cache_store and "kv_page_indices" in model_inputs:
-                    try:
-                        saved_layers = self.kv_cache_store[target_id]
-                        current_indices = model_inputs["kv_page_indices"].long()
-                        
-                        # 此时 saved_layers[0] 应该是一个 Tensor，检查其第一维度作为上限
-                        limit = min(len(current_indices), saved_layers[0].shape[0])
-                        
-                        if limit > 0:
-                            target_indices = current_indices[:limit]
-                            for i, source_tensor in enumerate(saved_layers):
-                                # 获取目标物理显存层 (Tensor)
-                                dest_tensor = self.kv_cache_at_layer[i]
-                                
-                                # [Fix] 直接 Tensor 对 Tensor 拷贝
-                                # source_tensor: [Pages, ...] -> 切片 [:limit]
-                                # dest_tensor: [Total_Pages, ...] -> 索引 [target_indices]
-                                dest_tensor[target_indices] = source_tensor[:limit].to(dest_tensor.device)
-                                
-                    except Exception as e:
-                        print(f"[Backend] ❌ Restore Warning: {e}")
-                        import traceback
-                        traceback.print_exc()
-
-            # 3. Model Forward
+            # 3. Run the forward pass through the model.
             with start_profile("model_forward"):
+                # Track PyTorch operations with fine-grained detail
                 tracker_context = self._get_tracker()
+
                 with tracker_context:
                     with _device_context(self.device):
-                        output_embeds = self.lm.model.forward(
+                        output_embeds = self.lm.model.forward(  # type: ignore[attr-defined]
                             kv_cache_at_layer=self.kv_cache_at_layer, **model_inputs
                         )
 
-            # [Step 3] 显存保存/更新 (Save/Update)
-            # 无论这是 Prefill 还是 Decode，我们都要更新 save_id 的状态
-            if self.current_batch_save_id:
-                target_id = self.current_batch_save_id
-                
-                # 只有在 Prefill 阶段或者特定时刻才全量保存
-                # 为了简化，我们沿用你之前的逻辑：只在 Prefill (is_decode_phase=False) 时保存
-                # 实际上 Decode 阶段也应该 Update，但 Pie 可能是 PageAttention 自动管理的？
-                # 这里我们保持你之前跑通的逻辑：只负责 Snapshot
-                
-                if not is_decode_phase and "kv_page_indices" in model_inputs:
-                    try:
-                        current_indices = model_inputs["kv_page_indices"].long()
-                        saved_data = []
-                        for layer_tensor in self.kv_cache_at_layer:
-                            # 必须 Clone! 
-                            page_data = layer_tensor[current_indices].clone()
-                            saved_data.append(page_data)
-                        
-                        self.kv_cache_store[target_id] = saved_data
-                        # print(f"[Backend] 💾 SNAPSHOT updated for {target_id}")
-                        
-                    except Exception as e:
-                        print(f"[Backend] ❌ Save Error: {e}")
-
+            # 4. Package the model outputs into response messages.
             with start_profile("package_responses"):
                 responses = batch.package_responses(output_embeds)
 

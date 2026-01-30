@@ -1,0 +1,29 @@
+{
+  "name": "The Multiverse Story",
+  "nodes": [
+    {
+      "id": "node_intro",
+      "image": "target/wasm32-wasip2/release/start_agent.wasm",
+      "instruction": "Start the story about a knight finding a magic sword.",
+      "dependencies": []
+    },
+    {
+      "id": "node_good",
+      "image": "target/wasm32-wasip2/release/continue_agent.wasm",
+      "instruction": "Continue to develop the storyline using this theme: The knight uses the sword to protect the weak.",
+      "dependencies": ["node_intro"]
+    },
+    {
+      "id": "node_bad",
+      "image": "target/wasm32-wasip2/release/continue_agent_standby.wasm",
+      "instruction": "Continue to develop the storyline using this theme: The knight was unable to utilize the full power of this sword.",
+      "dependencies": ["node_intro"]
+    },
+    {
+      "id": "node_finale",
+      "image": "target/wasm32-wasip2/release/merge_agent.wasm",
+      "instruction": "Compare these two stories with different endings and summarize the moral lesson.",
+      "dependencies": ["node_good", "node_bad"]
+    }
+  ]
+}

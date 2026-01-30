@@ -10,39 +10,34 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 class PieScheduler:
     def __init__(self, workflow_path):
         self.workflow_path = os.path.abspath(workflow_path)
+        self.workflow_dir = os.path.dirname(self.workflow_path)
         self.results = {} 
         self.run_id = f"run_{uuid.uuid4().hex[:8]}"
         
         print(f"[Scheduler] Init checking...")
         print(f"  - Workflow: {self.workflow_path}")
-        print(f"  - Mode:     Parallel Execution (ThreadPool)")
+        print(f"  - Run ID:   {self.run_id}")
 
         if not os.path.exists(self.workflow_path):
             raise FileNotFoundError(f"Workflow file not found: {self.workflow_path}")
             
         self.workflow = self._load_workflow()
+        self.node_map = {n['id']: n for n in self.workflow['nodes']}
 
     def _load_workflow(self):
         with open(self.workflow_path, 'r') as f:
             return json.load(f)
 
-    def _get_upstream_data(self, dependencies):
-        upstream_data = {}
-        for dep_id in dependencies:
-            # 这里的读取需要注意线程安全，但在 Python GIL 下字典读取通常是原子性的，
-            # 且我们的逻辑保证了只有依赖完成后才会读取，所以是安全的。
-            if dep_id in self.results:
-                upstream_data[dep_id] = self.results[dep_id]['content']
-            else:
-                raise Exception(f"Dependency {dep_id} not executed yet!")
-        return upstream_data
+    def _get_task_id(self, node_id):
+        """生成全局唯一的 Task ID"""
+        return f"{self.run_id}_{node_id}"
 
-    def run_node(self, node,parent_node):
+    def run_node(self, node): 
         node_id = node['id']
         raw_image_path = node['image']
         
-        workflow_dir = os.path.dirname(self.workflow_path)
-        wasm_path = os.path.join(workflow_dir, raw_image_path)
+        # 1. 路径解析 (基于 workflow 文件所在目录)
+        wasm_path = os.path.join(self.workflow_dir, raw_image_path)
         wasm_path = os.path.abspath(wasm_path)
 
         start_ts = datetime.now().strftime("%H:%M:%S.%f")[:12]
@@ -50,26 +45,28 @@ class PieScheduler:
         
         if not os.path.exists(wasm_path):
             print(f"[Error] Wasm file not found at: {wasm_path}")
-            return False
+            return False, ""
 
         try:
+            # 2. 解析依赖关系，构造父任务 ID 列表
+            # 这是支持 Merge 节点的关键：传入所有父节点的 Task ID
             dependencies = node.get("dependencies", [])
+            parent_task_ids = [self._get_task_id(dep_id) for dep_id in dependencies]
             
-            # [Fix] 显式获取父节点 ID，不再做 Magic String 注入
-            parent_node_id = dependencies[0] if dependencies else None
-            parent_node_instruction = parent_node['config']['instruction'] if dependencies else None
+            current_task_id = self._get_task_id(node_id)
 
-            # [Fix] 构造 input_payload，明确传递拓扑信息
+            # 3. 构造 Payload (极简协议)
+            # 不再包含 mode, max_tokens, temperature 等业务参数
+            # 只包含：我是谁(task_id)，我爸是谁(parent_ids)，我要干嘛(prompt)
             input_payload = {
-                "run_id": self.run_id,
-                "node_id": node_id,
-                "parent_node_id": parent_node_id, # 新增字段
-                "parent_node_instruction": parent_node_instruction,
-                "input_context": node.get("config", {}),
-                "upstream_results": self._get_upstream_data(dependencies)
+                "task_id": current_task_id,
+                "parent_task_ids": parent_task_ids, 
+                "prompt": node.get("instruction", "")
             }
+            
             input_json_str = json.dumps(input_payload)
 
+            # 4. 调用 Pie 引擎
             cmd = [
                 "pie-cli", "submit",
                 wasm_path,
@@ -77,8 +74,9 @@ class PieScheduler:
                 "--input", input_json_str
             ]
 
+            # 环境变量清理
             env = os.environ.copy()
-            env["RUST_LOG"] = "error"
+            env["RUST_LOG"] = "error" # 减少底层日志噪音
 
             start_time = time.time()
             result = subprocess.run(
@@ -89,111 +87,100 @@ class PieScheduler:
 
             if result.returncode != 0:
                 print(f"[Scheduler] ❌ Node {node_id} failed:\n{result.stderr}")
-                return False
+                return False, result.stderr
 
             raw_output = result.stdout.strip()
-            clean_content = raw_output 
             
-            if "Completed:" in raw_output: clean_content = raw_output.split("Completed:", 1)[1].strip()
-            
-            # 清洗可能的 tag 输出，保持日志干净
-            if "[SAVE:" in clean_content:
-                # 简单的字符串切分清洗，防止日志太长
-                pass
-
             end_ts = datetime.now().strftime("%H:%M:%S.%f")[:12]
             print(f"[{end_ts}] [Scheduler] ✅ [Finish] {node_id} ({elapsed:.2f}s)")
             
-            self.results[node_id] = {"content": clean_content, "status": "success"}
-            return True
+            return True, raw_output
 
         except Exception as e:
             print(f"[Scheduler] System Error in {node_id}: {e}")
-            return False
+            import traceback
+            traceback.print_exc()
+            return False, str(e)
 
     def run(self):
-        print(f"=== Starting Workflow: {self.workflow['name']} (ID: {self.run_id}) ===")
+        print(f"=== Starting Workflow: {self.workflow.get('name', 'Untitled')} ===")
         
-        all_nodes = {n['id']: n for n in self.workflow['nodes']}
-        pending_ids = set(all_nodes.keys())
+        pending_ids = set(self.node_map.keys())
         completed_ids = set()
-        running_ids = set() # 记录正在运行的节点
+        running_ids = set()
+        
+        # 拓扑排序/依赖检查循环
+        # max_workers 可以根据显存大小调整
+        max_parallel = 4
+        
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            futures = {}
 
-        # 创建线程池，最大并发数设为 4（可根据演示需要调整）
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {} # 映射：Future对象 -> node_id
-
-            # === 事件驱动循环 ===
             while pending_ids or futures:
-                # 1. 扫描可运行的节点
-                # 条件：在等待列表 + 依赖全部完成 + 没在运行
+                # A. 扫描所有可以执行的节点 (Ready Nodes)
+                # 条件：所有依赖都在 completed_ids 中，且自身没在运行
                 ready_nodes = []
-                for nid in list(pending_ids): # 用 list 复制一份以防遍历时修改
-                    if nid in running_ids:
-                        continue
-                        
-                    node = all_nodes[nid]
+                for nid in list(pending_ids):
+                    if nid in running_ids: continue
+                    
+                    node = self.node_map[nid]
                     deps = node.get("dependencies", [])
+                    
                     if all(d in completed_ids for d in deps):
                         ready_nodes.append(node)
 
-                # 2. 发射任务 (Launch)
+                # B. 提交任务到线程池
                 for node in ready_nodes:
                     nid = node['id']
-                    # 提交给线程池，非阻塞
-                    dependencies = node.get("dependencies", [])
-                    # [Fix] 显式获取父节点 ID，不再做 Magic String 注入
-                    parent_node_id = dependencies[0] if dependencies else None
-                    if parent_node_id == None:
-                        future = executor.submit(self.run_node, node,node)
-                    else:
-                        future = executor.submit(self.run_node, node,all_nodes[parent_node_id])
+                    print(f"[Scheduler] Submitting {nid}...")
+                    future = executor.submit(self.run_node, node)
                     futures[future] = nid
-                    
-                    # 标记状态
                     running_ids.add(nid)
-                    # 注意：此时不能从 pending_ids 删除，要等真正完成才删，
-                    # 或者现在删也行，但为了逻辑清晰，我们在完成时处理 pending
+                    # 注意：pending_ids 在这里不能删，要等做完才删
 
-                if not futures and not ready_nodes:
-                    print("[Scheduler] ❌ Deadlock or no nodes ready!")
-                    break
+                if not futures and not ready_nodes and pending_ids:
+                    remaining = pending_ids - running_ids
+                    if remaining:
+                        print(f"[Scheduler] ❌ Deadlock detected! Remaining nodes waiting for deps: {remaining}")
+                        # 打印一下具体的依赖缺失情况，方便调试
+                        for rid in remaining:
+                            print(f"  - {rid} needs: {self.node_map[rid].get('dependencies')}")
+                        break
 
-                # 3. 等待任意一个任务完成 (Wait for Event)
-                # return_when=FIRST_COMPLETED 是实现流水线并行的关键
+                # C. 事件循环：等待任意一个任务完成
                 if futures:
-                    done, not_done = wait(futures.keys(), return_when=FIRST_COMPLETED)
-                    
-                    # 处理完成的任务
+                    done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
                     for f in done:
-                        nid = futures.pop(f) # 从监控列表中移除
+                        nid = futures.pop(f)
+                        running_ids.remove(nid)
+                        
                         try:
-                            success = f.result() # 获取返回值
+                            success, content = f.result()
                             if success:
                                 completed_ids.add(nid)
-                                pending_ids.remove(nid) # 彻底完工
+                                pending_ids.remove(nid)
+                                self.results[nid] = {"content": content, "status": "success"}
                             else:
-                                print(f"[Scheduler] ❌ Workflow aborted due to failure in {nid}")
-                                return # 简单起见，有一个失败就终止
+                                print(f"[Scheduler] ❌ Aborting workflow due to failure in {nid}")
+                                # 遇到错误是否继续？这里选择终止
+                                return 
                         except Exception as e:
-                            print(f"[Scheduler] 💥 Exception in worker: {e}")
+                            print(f"[Scheduler] 💥 Exception in worker thread: {e}")
                             return
-                        
-                        running_ids.remove(nid)
             
         print(f"\n=== Workflow Completed Successfully! ===")
         print(f"Final Results:")
+        # 按照简单的依赖顺序打印结果，或者直接按 ID 打印
         for nid, res in self.results.items():
-            # [修改] 打印完整内容，不再截断
             print(f"\n>>>>> Node: [{nid}] <<<<<")
             print(res['content'])
             print("-" * 40)
 
 if __name__ == "__main__":
-    workflow_file = "example-apps/workflow_demo.json"
+    workflow_file = "example-apps/workflow.json" 
     try:
         scheduler = PieScheduler(workflow_file)
         scheduler.run()
-    except FileNotFoundError as e:
+    except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
