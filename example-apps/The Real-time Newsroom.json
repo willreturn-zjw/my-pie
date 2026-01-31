@@ -1,0 +1,36 @@
+{
+  "name": "The Real-time Newsroom",
+  "description": "A simulation of an AI news agency using Broadcast/Subscribe pattern.",
+  "nodes": [
+    {
+      "id": "news_wire",
+      "image": "target/wasm32-wasip2/release/news_agent.wasm",
+      "instruction": "ROLE: WIRE. You are the source of the facts. Generate 3 brief and true breaking news headlines, respectively related to politics, sports, and technology. Present only the original facts, without any embellishment.",
+      "dependencies": []
+    },
+    {
+      "id": "politics_desk",
+      "image": "target/wasm32-wasip2/release/news_agent.wasm",
+      "instruction": "ROLE: DESK. TOPIC: POLITICS. Subscribe to the global wire. Only focus on political-related news. Write a serious and analytical article.",
+      "dependencies": ["news_wire"]
+    },
+    {
+      "id": "tech_desk",
+      "image": "target/wasm32-wasip2/release/news_agent.wasm",
+      "instruction": "ROLE: DESK. TOPIC: TECH. Subscribe to the global wire. Only focus on news related to technology.. Write an excited, futuristic article.",
+      "dependencies": ["news_wire"]
+    },
+    {
+      "id": "sports_desk",
+      "image": "target/wasm32-wasip2/release/news_agent.wasm",
+      "instruction": "ROLE: DESK. TOPIC: SPORTS. Subscribe to the global wire. Only focus on sports-related news. Write a high-energy, emotional article.",
+      "dependencies": ["news_wire"]
+    },
+    {
+      "id": "editor_in_chief",
+      "image": "target/wasm32-wasip2/release/news_agent.wasm",
+      "instruction": "ROLE: EDITOR. Subscribe to the Politics, Tech, and Sports desks. Aggregate their distinct reports into a cohesive 'Daily Morning Newsletter'. Add a catchy headline and an intro.",
+      "dependencies": ["politics_desk", "tech_desk", "sports_desk"]
+    }
+  ]
+}

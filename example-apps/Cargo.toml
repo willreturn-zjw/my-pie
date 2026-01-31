@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["text-completion","start_agent","continue_agent","merge_agent","continue_agent_standby"]
+members = ["text-completion","start_agent","continue_agent","merge_agent","continue_agent_standby","news_agent"]
 
 [workspace.dependencies]
 wit-bindgen = "0.46.0"
